@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8" />
+<title>Volumetric Terrain</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+html,body{height:100%;margin:0;background:#000;} canvas{display:block;width:100vw;height:100vh;}
+#ui{position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.55);padding:10px;border-radius:8px;color:#fff;font-family:Inter,Arial,sans-serif;font-size:13px;z-index:999;}
+#ui label{display:block;margin:6px 0 2px;opacity:0.9} #ui input[type=range]{width:180px;} #ui select{width:190px;}
+#credits{position:fixed;left:12px;bottom:12px;color:#666;font-family:monospace;font-size:12px;opacity:0.7}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="ui">
+<label>Grafika (Quality)</label>
+<select id="quality">
+<option value="1">Very Low</option>
+<option value="2">Low</option>
+<option value="4" selected>Medium</option>
+<option value="8">High</option>
+<option value="16">Ultra</option>
+</select>
+
+<label>Layer intensity</label>
+<input id="layerIntensity" type="range" min="0.2" max="2.0" step="0.05" value="0.85">
+
+<label>Noise / Terrain scale</label>
+<input id="noiseScale" type="range" min="0.5" max="8.0" step="0.1" value="3.0">
+
+<label>Height intensity</label>
+<input id="height" type="range" min="0.0" max="0.7" step="0.01" value="0.18">
+
+<label>Side light</label>
+<input id="sideLight" type="range" min="0.0" max="1.0" step="0.01" value="0.2">
+
+<label>Banding (discrete layers)</label>
+<input id="band" type="checkbox">
+
+<div style="margin-top:8px; font-size:12px; color:#ccc">
+Drag (bal egér) = forgatás
+
+<div id="credits">
+VSBM-like terrain • fine-tuned<br>
+Danika1124 made this masterpeace
+</div>
+
+</div>
+</div>
+
+<script>
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2',{antialias:false});
+if(!gl){ alert('WebGL2 kell!'); throw 0; }
+
+function fit(){canvas.width=innerWidth;canvas.height=innerHeight;gl.viewport(0,0,canvas.width,canvas.height);}
+addEventListener('resize',fit);fit();
+
+// shaders
+const vsSrc = `#version 300 es
+in vec2 a_pos; out vec2 v_uv;
+void main(){v_uv = a_pos*0.5 + 0.5; gl_Position=vec4(a_pos,0.0,1.0);}
+`;
+const fsSrc = `#version 300 es
+precision highp float; in vec2 v_uv; out vec4 o;
+uniform vec2 u_res; uniform float u_time; uniform vec2 u_drag; uniform float u_zoom;
+uniform int u_quality; uniform float u_layerIntensity; uniform float u_noiseScale;
+uniform float u_sideLight; uniform float u_height; uniform int u_band;
+
+#define PI 3.14159265359
+vec3 hash3(vec3 p){p=vec3(dot(p,vec3(127.1,311.7,74.7)),dot(p,vec3(269.5,183.3,246.1)),dot(p,vec3(113.5,271.9,124.6)));return -1.0+2.0*fract(sin(p)*43758.5453123);}
+float noise3(vec3 p){vec3 i=floor(p), f=fract(p), u=f*f*(3.0-2.0*f);
+float n000=dot(hash3(i+vec3(0,0,0)),f-vec3(0)),n100=dot(hash3(i+vec3(1,0,0)),f-vec3(1,0,0)),n010=dot(hash3(i+vec3(0,1,0)),f-vec3(0,1,0)),n001=dot(hash3(i+vec3(0,0,1)),f-vec3(0,0,1)),n110=dot(hash3(i+vec3(1,1,0)),f-vec3(1,1,0)),n101=dot(hash3(i+vec3(1,0,1)),f-vec3(1,0,1)),n011=dot(hash3(i+vec3(0,1,1)),f-vec3(0,1,1)),n111=dot(hash3(i+vec3(1,1,1)),f-vec3(1,1,1));
+float nx00=mix(n000,n100,u.x),nx10=mix(n010,n110,u.x),nx01=mix(n001,n101,u.x),nx11=mix(n011,n111,u.x),nxy0=mix(nx00,nx10,u.y),nxy1=mix(nx01,nx11,u.y);return mix(nxy0,nxy1,u.z);}
+float fbm(vec3 p){float s=0.0,a=0.6;for(int i=0;i<5;i++){s+=a*noise3(p);p*=2.0;a*=0.5;}return s;}
+float sdSphere(vec3 p,float r){return length(p)-r;}
+vec3 palette(float t){return 0.5+0.45*cos(6.28318*(vec3(0.0,0.25,0.5)+t));}
+
+void main(){
+vec2 uv=(v_uv*2.0-1.0); uv.x*=u_res.x/u_res.y;
+float theta=u_drag.x*6.2831853; float phi=(u_drag.y-0.25)*1.4; float radius=1.9/u_zoom;
+vec3 ro=vec3(cos(phi)*sin(theta),sin(phi)*0.6,cos(phi)*cos(theta))*radius; vec3 target=vec3(0.0);
+vec3 fwd=normalize(target-ro), right=normalize(cross(vec3(0,1,0),fwd)), up=cross(fwd,right);
+vec3 rd=normalize(fwd+uv.x*right+uv.y*up);
+
+vec3 pos=ro,acc=vec3(0.0); float alphaAcc=0.0;
+int steps=int(clamp(float(u_quality)*8.0,24.0,512.0));
+int layers=int(clamp(float(u_quality)*5.0,12.0,120.0));
+float densityScalar=1.0; float noiseScale=max(0.001,u_noiseScale);
+
+for(int i=0;i<512;i++){if(i>=steps)break;
+float terrain=fbm(normalize(pos)*noiseScale+pos*0.5)*u_height;
+float radiusOffset=terrain; float d=sdSphere(pos,1.0+radiusOffset);
+float small=fbm(pos*(noiseScale*0.8)+vec3(0.0,u_time*0.05,0.0))*0.08; d-=small;
+float shell=exp(-abs(d)*10.0)*densityScalar;
+float rlen=length(pos); float elev=clamp((rlen-0.6)/1.0,0.0,1.0);
+float layerF=elev*float(layers); if(u_band==1){layerF=floor(layerF+0.5);}
+float tcol=fract(layerF+u_time*0.02+terrain*0.5);
+vec3 col=palette(tcol);
+float depthFactor=smoothstep(0.0,0.5,elev);
+vec3 deepTint=mix(vec3(0.08,0.06,0.04),col,depthFactor); col=deepTint;
+vec3 nApprox=normalize(pos); float sun=clamp(dot(normalize(vec3(1.0,0.4,0.0)),nApprox),0.0,1.0);
+col+=u_sideLight*sun*0.4;
+float contribution=shell*u_layerIntensity/float(layers); acc+=col*contribution; alphaAcc+=contribution;
+float travel=max(0.02,abs(d)*0.35); pos+=rd*travel;
+if(alphaAcc>1.0)break;}
+vec3 color=acc*1.4; color=color/(1.0+color*0.8);
+float tcenter=fract(length(ro+rd*0.5)*0.3+u_time*0.03); vec3 neighbor=palette(fract(tcenter+0.02))*0.02;
+vec3 blended=mix(color,(color+neighbor)*0.5,0.28);
+o=vec4(clamp(blended,0.0,1.0),1.0);}
+`;
+
+function compile(type,src){const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){console.error('Shader error:',gl.getShaderInfoLog(s)); throw 'shader fail';} return s;}
+const vs=compile(gl.VERTEX_SHADER,vsSrc), fs=compile(gl.FRAGMENT_SHADER,fsSrc);
+const prog=gl.createProgram(); gl.attachShader(prog,vs); gl.attachShader(prog,fs); gl.bindAttribLocation(prog,0,'a_pos'); gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){console.error(gl.getProgramInfoLog(prog)); throw 0;} gl.useProgram(prog);
+
+// quad
+const quadV=new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]);
+const vbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vbo); gl.bufferData(gl.ARRAY_BUFFER,quadV,gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+
+const loc={
+u_res: gl.getUniformLocation(prog,'u_res'), u_time: gl.getUniformLocation(prog,'u_time'),
+u_drag: gl.getUniformLocation(prog,'u_drag'), u_zoom: gl.getUniformLocation(prog,'u_zoom'),
+u_quality: gl.getUniformLocation(prog,'u_quality'), u_layerIntensity: gl.getUniformLocation(prog,'u_layerIntensity'),
+u_noiseScale: gl.getUniformLocation(prog,'u_noiseScale'), u_sideLight: gl.getUniformLocation(prog,'u_sideLight'),
+u_height: gl.getUniformLocation(prog,'u_height'), u_band: gl.getUniformLocation(prog,'u_band'),
+};
+
+const ui={
+quality: document.getElementById('quality'),
+layerIntensity: document.getElementById('layerIntensity'),
+noiseScale: document.getElementById('noiseScale'),
+sideLight: document.getElementById('sideLight'),
+height: document.getElementById('height'),
+band: document.getElementById('band')
+};
+
+let dragging=false, dragX=0.0, dragY=0.3;
+canvas.addEventListener('pointerdown',(e)=>{if(e.button===0){dragging=true;canvas.setPointerCapture(e.pointerId);}});
+canvas.addEventListener('pointerup',(e)=>{dragging=false;});
+canvas.addEventListener('pointermove',(e)=>{if(dragging){dragX+=e.movementX/canvas.width; dragY+=e.movementY/canvas.height; dragY=Math.max(-0.6,Math.min(0.8,dragY));}});
+
+function frame(t){
+const time=t*0.001;
+gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+gl.uniform2f(loc.u_res,canvas.width,canvas.height);
+gl.uniform1f(loc.u_time,time); gl.uniform2f(loc.u_drag,dragX,dragY); gl.uniform1f(loc.u_zoom,1.0);
+gl.uniform1i(loc.u_quality,parseInt(ui.quality.value));
+gl.uniform1f(loc.u_layerIntensity,parseFloat(ui.layerIntensity.value));
+gl.uniform1f(loc.u_noiseScale,parseFloat(ui.noiseScale.value));
+gl.uniform1f(loc.u_sideLight,parseFloat(ui.sideLight.value));
+gl.uniform1f(loc.u_height,parseFloat(ui.height.value));
+gl.uniform1i(loc.u_band,ui.band.checked?1:0);
+gl.drawArrays(gl.TRIANGLES,0,6); requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
