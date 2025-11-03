@@ -1,0 +1,1 @@
+Please use a better computer than your avareage 1998 laptop. Atleast use a pc with a gpu better than a rtx 2070 or a little more less.. Idk what kind of gpu you have but... Good luck if your pc survives👌.
